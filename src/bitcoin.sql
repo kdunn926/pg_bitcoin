@@ -6,7 +6,7 @@ drop type bitcoin_transaction_witness ;
 
 create type bitcoin_transaction_input_outpoint as (
 	hash char(64),
-	index int
+	index bigint
 );
 
 create type bitcoin_transaction_input as (
@@ -16,12 +16,12 @@ create type bitcoin_transaction_input as (
 );
 
 create type bitcoin_transaction_output as (
-	value int,
+	value bigint,
 	script text	
 );
 
 create type bitcoin_transaction_witness as (
-	number int,
+	number bigint,
 	"scriptCode" char(212)
 );
 
@@ -32,7 +32,7 @@ create type bitcoin_transaction as (
 	marker int,
 	flag int,
 	witness bitcoin_transaction_witness[],
-	locktime int
+	locktime bigint
 );
 
 create or replace function btcd_bitcoin_raw_transaction(arg_url text, arg_raw_transaction text default '9d609c57efa02ec1e897e467298f1db8b4a9aa2ac611c4684aa24e243da251e5')
@@ -99,7 +99,18 @@ tx = tx_deserialize(rpc_connection.getrawtransaction(arg_raw_transaction))
 #
 # tx['ins'] = [unnestIns(i) for i in tx['ins']]
 
-return tx
+# Use a template for compatibility with earlier transactions
+txTemplate = {
+  'ins': None,
+  'outs': None,
+  'version': None,
+  'marker': None,
+  'flag': None,
+  'witness': None,
+  'locktime': None
+}
+
+return { **txTemplate, **tx }
 
 $$ language plpython3u volatile;
 
@@ -180,6 +191,56 @@ except JSONRPCException as e:
     plpy.error(e.message)
 
 return rpc_connection.getblock(arg_block_hash)
+
+$$ language plpython3u volatile;
+
+create or replace function btcd_bitcoin_blocknumber(arg_url text, arg_block_number bigint default 1)
+returns bitcoin_block
+as $$
+
+from bitcoinrpc.authproxy import AuthServiceProxy, JSONRPCException
+from os import environ
+
+url = None
+
+if arg_url is not None:
+    # Use a "http://user:password@host:port" URL string from the argument list
+    url = arg_url
+
+else:
+    # Postgres must be started with the
+    # following variables in the environment,
+    # each prefixed by btcd_rpc_ (e.g. btcd_rpc_host)
+    rpc_vars = ['host', 'port', 'user', 'password']
+
+    required_vars = set('btcd_rpc_' + v for v in rpc_vars)
+    defined_vars = set(environ).intersection(required_vars)
+    missing_vars = required_vars.difference(defined_vars)
+
+    if missing_vars and not arg_url:
+        message = "The following " if len(defined_vars) else "No "
+        message += "environment variables were detected..."
+        plpy.notice(message)
+        plpy.notice(defined_vars if len(defined_vars) else '')
+        plpy.notice("")
+        plpy.notice("Please set these environment variables in the postgres user environment and restart:")
+        plpy.notice("    '" + "', '".join(missing_vars) + "'")
+        plpy.notice("")
+        plpy.error("Missing required btcd environment variables or URL argument")
+
+    rpc_config = { k: environ.get('btcd_rpc_' + k) for k in rpc_vars }
+
+    url = "http://{user}:{password}@{host}:{port}".format(**rpc_config)
+
+try:
+    rpc_connection = AuthServiceProxy(url)
+    node_info = rpc_connection.getblockchaininfo()
+    plpy.info("Current block height: {}".format(node_info.get('headers')))
+
+except JSONRPCException as e:
+    plpy.error(e.message)
+
+return rpc_connection.getblock(rpc_connection.getblockhash(arg_block_number))
 
 $$ language plpython3u volatile;
 
